@@ -9,17 +9,25 @@
    :caption: Contents:
 
 .. automodule:: subpub
-		
+
 .. autoclass:: subpub.SubPub
    :members:
 
    .. automethod:: __init__
 
 .. autoclass:: subpub.Msg
-   :members:	       
-	   
+   :members:
+
 .. autoclass:: subpub.ExceptionAwareQueue
-   :members:	       
+   :members:
 
 .. autoclass:: subpub.MqttTopic
-   :members:	       
+   :members:
+
+.. autoclass:: subpub.AsyncSubPub
+   :members:
+
+   .. automethod:: __init__
+
+.. autoclass:: subpub.AsyncExceptionAwareQueue
+   :members:

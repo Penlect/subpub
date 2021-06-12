@@ -107,9 +107,10 @@ __contact__ = __email__
 __copyright__ = 'Copyright (c) 2020 Daniel Andersson'
 __license__ = 'MIT'
 __url__ = 'https://github.com/Penlect/subpub'
-__version__ = '0.9.0'
+__version__ = '1.0.0'
 
 # Built-in
+import asyncio
 import collections
 import queue
 import re
@@ -419,3 +420,123 @@ class ExceptionAwareQueue(queue.SimpleQueue):
     def get_nowait(self):
         """Same as ``get()`` but with ``block=False``."""
         self.get(block=False)
+
+
+# ASYNC API
+# =========
+
+class AsyncSubPub:
+    """Asynchronous implementation of SubPub.
+
+    It has the same API as SubPub but is based on the asyncio paradigm.
+    """
+
+    def __init__(self, queue_factory=asyncio.Queue, *, timeout=None):
+        """Initialization of AsyncSubPub instance."""
+        self.timeout = timeout
+        self.queue_factory = queue_factory
+        self._subscriptions = collections.defaultdict(
+            weakref.WeakValueDictionary)
+        self._retained = dict()
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}('\
+            f'queue_factory={self.queue_factory.__name__}, '\
+            f'timeout={self.timeout!r})'
+
+    async def subscribe(self, topic: str, *, queue=None, timeout=None, **args):
+        """Subscribe to topic and receive published data in queue."""
+        if timeout is None:
+            timeout = self.timeout
+        if isinstance(topic, str):
+            topic = re.compile(topic)
+        elif isinstance(topic, MqttTopic):
+            topic = topic.as_regexp()
+        q = queue or self.queue_factory(**args)
+        t = asyncio.current_task()
+        self._subscriptions[t][topic] = q
+        for retained_topic, retained_data in self._retained.items():
+            match = topic.match(retained_topic)
+            if match:
+                try:
+                    await asyncio.wait_for(
+                        q.put(Msg(match, retained_data)), timeout)
+                except asyncio.TimeoutError as error:
+                    raise asyncio.QueueFull from error
+        return q
+
+    async def unsubscribe(self, topic: str) -> bool:
+        """Unsubscribe to topic."""
+        if isinstance(topic, str):
+            topic = re.compile(topic)
+        elif isinstance(topic, MqttTopic):
+            topic = topic.as_regexp()
+        t = asyncio.current_task()
+        try:
+            del self._subscriptions[t][topic]
+        except KeyError:
+            return False
+        return True
+
+    async def unsubscribe_all(self) -> int:
+        """Unsubscribe to all clients"""
+        t = asyncio.current_task()
+        try:
+            return len(self._subscriptions.pop(t, list()))
+        except KeyError:
+            return 0
+
+    async def publish(self, topic: str, data=None, *, retain=False,
+                      timeout=None):
+        """Publish data to topic."""
+        if timeout is None:
+            timeout = self.timeout
+        if retain:
+            if data is None:
+                try:
+                    del self._retained[topic]
+                except KeyError:
+                    pass
+            else:
+                self._retained[topic] = data
+        remove_us = set()
+        did_put = False
+        for t, sub in self._subscriptions.items():
+            if not sub:
+                # All references are gone.
+                remove_us.add(t)
+                continue
+            for topic_regex, q in sub.items():
+                match = topic_regex.match(topic)
+                if match:
+                    try:
+                        await asyncio.wait_for(q.put(Msg(match, data)), timeout)
+                    except asyncio.TimeoutError as error:
+                        raise asyncio.QueueFull from error
+                    did_put = True
+        for t in remove_us:
+            del self._subscriptions[t]
+        return did_put
+
+
+class AsyncExceptionAwareQueue(asyncio.Queue):
+    """Asynchronous ExceptionAwareQueue"""
+
+    async def get(self):
+        """If item retrived is an Exception instance, raise it."""
+        match, data = await super().get()
+        # Prepend the match object to exception args.
+        # Note: Exception *classes* won't be catched here,
+        #       only instances.
+        if isinstance(data, Exception):
+            data.args = (match, *data.args)
+            raise data
+        return match, data
+
+    def get_nowait(self):
+        """Same as ``get()`` but not blocking."""
+        match, data = super().get_nowait()
+        if isinstance(data, Exception):
+            data.args = (match, *data.args)
+            raise data
+        return match, data
